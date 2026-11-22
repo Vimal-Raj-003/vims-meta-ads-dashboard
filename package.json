@@ -1,0 +1,12 @@
+{
+  "name": "vims-meta-ads-dashboard",
+  "version": "1.0.0",
+  "description": "VIMS Enterprise Private Performance Marketing Dashboard for Meta Ads (Facebook & Instagram)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings tests/verify.test.js"
+  },
+  "author": "VIMS Enterprise",
+  "license": "PRIVATE"
+}

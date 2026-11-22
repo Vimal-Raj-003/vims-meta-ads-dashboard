@@ -109,7 +109,7 @@ function handleCloudFallback(url, options = {}) {
   }
 
   if (pathname === '/api/meta/switch-account') {
-    const accountId = body.accountId || 'act_1717025589122647';
+    const accountId = body.accountId || 'act_vims_all_accounts';
     state.cloudSelectedAccountId = accountId;
     bundle.connection.selectedAdAccountId = accountId;
     return {
@@ -160,7 +160,7 @@ function handleCloudFallback(url, options = {}) {
 
   if (pathname.startsWith('/api/ads/')) {
     const adId = decodeURIComponent(pathname.replace('/api/ads/', ''));
-    const activeAcc = state.cloudSelectedAccountId || bundle.connection.selectedAdAccountId || 'act_1717025589122647';
+    const activeAcc = state.cloudSelectedAccountId || bundle.connection.selectedAdAccountId || 'act_vims_all_accounts';
     const ov = bundle.overviewsByAccount[activeAcc] || bundle.overviewsByAccount['act_vims_all_accounts'];
     const found = (ov.adsTable || []).find(a => a.adId === adId) || (bundle.overviewsByAccount['act_vims_all_accounts']?.adsTable || []).find(a => a.adId === adId);
     return {
@@ -197,11 +197,10 @@ function handleCloudFallback(url, options = {}) {
     if (ds === 'demo_mode' && bundle.demoOverview) {
       return { connection: bundle.connection, overview: JSON.parse(JSON.stringify(bundle.demoOverview)) };
     }
-    const accId = parsed.searchParams.get('accountId') || state.cloudSelectedAccountId || bundle.connection.selectedAdAccountId || 'act_1717025589122647';
-    const baseOv = bundle.overviewsByAccount[accId] || bundle.overviewsByAccount['act_1717025589122647'];
+    const accId = parsed.searchParams.get('accountId') || state.cloudSelectedAccountId || bundle.connection.selectedAdAccountId || 'act_vims_all_accounts';
+    const baseOv = bundle.overviewsByAccount[accId] || bundle.overviewsByAccount['act_vims_all_accounts'];
     const cloned = JSON.parse(JSON.stringify(baseOv));
 
-    // Apply client-side status, campaign, ad & search filters
     const campFilter = parsed.searchParams.get('campaignId') || '';
     const adFilter = parsed.searchParams.get('adId') || '';
     const statusFilter = parsed.searchParams.get('status') || 'ALL';
@@ -221,14 +220,22 @@ function handleCloudFallback(url, options = {}) {
       cloned.campaignsTable = cloned.campaignsTable.filter(c => c.effectiveStatus === statusFilter);
       cloned.adsTable = cloned.adsTable.filter(a => a.effectiveStatus === statusFilter);
     }
-    if (searchQ) {
-      cloned.campaignsTable = cloned.campaignsTable.filter(c => c.name.toLowerCase().includes(searchQ) || c.campaignId.toLowerCase().includes(searchQ));
-      cloned.adsTable = cloned.adsTable.filter(a => a.name.toLowerCase().includes(searchQ) || a.campaignName.toLowerCase().includes(searchQ));
+    if (searchQ && !searchQ.includes('@')) {
+      cloned.campaignsTable = cloned.campaignsTable.filter(c =>
+        c.name.toLowerCase().includes(searchQ) || c.campaignId.toLowerCase().includes(searchQ)
+      );
+      cloned.adsTable = cloned.adsTable.filter(a =>
+        a.name.toLowerCase().includes(searchQ) || a.campaignName.toLowerCase().includes(searchQ) || a.adId.toLowerCase().includes(searchQ)
+      );
     }
-    return { connection: bundle.connection, overview: cloned };
+
+    return {
+      connection: bundle.connection,
+      overview: cloned
+    };
   }
 
-  return { status: 'ok' };
+  return { ok: true, message: 'Executed in cloud static mode.' };
 }
 
 async function apiFetch(url, options = {}) {
@@ -244,19 +251,12 @@ async function apiFetch(url, options = {}) {
     if (!contentType.includes('application/json')) {
       return handleCloudFallback(url, options);
     }
-    if (res.status === 404 && window.__VIMS_CLOUD_BUNDLE__) {
-      return handleCloudFallback(url, options);
-    }
     if (res.status === 401 && !url.startsWith('/api/auth/')) {
-      if (window.__VIMS_CLOUD_BUNDLE__) return handleCloudFallback(url, options);
       state.authenticated = false;
       renderAuthGate();
       throw new Error('Session expired. Please log in.');
     }
-    const data = await res.json().catch(() => null);
-    if (!data || (!res.ok && res.status >= 500 && window.__VIMS_CLOUD_BUNDLE__)) {
-      return handleCloudFallback(url, options);
-    }
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.error || `Request failed (${res.status})`);
       err.payload = data;
@@ -271,34 +271,53 @@ async function apiFetch(url, options = {}) {
   }
 }
 
+function sanitizeSearchBoxAutofill() {
+  const sb = document.getElementById('filterSearch');
+  if (sb && sb.value && sb.value.includes('@')) {
+    sb.value = '';
+    if (state.filters.search && state.filters.search.includes('@')) {
+      state.filters.search = '';
+      loadDashboard().catch(() => {});
+    }
+  }
+}
+
 // ============================================================================
 // 1. Initialization & Auth Gate
 // ============================================================================
 
 async function initApp() {
   try {
+    sanitizeSearchBoxAutofill();
+    setTimeout(sanitizeSearchBoxAutofill, 150);
+    setTimeout(sanitizeSearchBoxAutofill, 500);
+    setTimeout(sanitizeSearchBoxAutofill, 1200);
+
     let authStatus = await apiFetch('/api/auth/status', { method: 'GET' });
     if (!authStatus.authenticated) {
-      // Automatically authenticate the local/Vercel VIMS admin session so there is zero login wall
       try {
-        authStatus = await apiFetch('/api/auth/auto-login', { method: 'POST' });
+        const autoRes = await apiFetch('/api/auth/auto-login', { method: 'POST', body: '{}' });
+        if (autoRes && autoRes.authenticated) {
+          authStatus = autoRes;
+        }
       } catch {
-        // Fallback to manual auth gate if auto-login fails
+        // Fallback to manual auth gate if auto-login disabled
       }
     }
-    state.needsInitialSetup = Boolean(authStatus.needsInitialSetup);
-    state.authenticated = Boolean(authStatus.authenticated);
-    state.user = authStatus.user || null;
+    state.needsInitialSetup = authStatus.needsInitialSetup;
+    state.authenticated = authStatus.authenticated;
+    state.user = authStatus.user;
 
     if (!state.authenticated) {
       renderAuthGate();
     } else {
       showMainApp();
+      sanitizeSearchBoxAutofill();
       await loadDashboard();
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.has('oauth')) {
         window.openMetaSetupModal();
-        window.history.replaceState({}, document.title, window.location.pathname);
+        window.history.replaceState({}, document.title, '/');
       }
     }
   } catch (err) {
@@ -380,9 +399,8 @@ function renderHeaderAndBanner() {
   document.getElementById('hdrCurrencyTz').textContent = `${acc.currency} • ${acc.timezoneName}`;
 
   const statusEl = document.getElementById('hdrConnStatus');
-  const hasRealCampaigns = (ov.campaignsTable && ov.campaignsTable.length > 0);
-  if (conn.connectionStatus === 'connected' || (acc.dataSource === 'meta_api' && hasRealCampaigns)) {
-    statusEl.innerHTML = `<span class="status-dot green"></span> Meta Connected (${esc(conn.connectedUserEmail || 'vims2023@gmail.com')})`;
+  if (conn.connectionStatus === 'connected' && conn.hasAccessToken) {
+    statusEl.innerHTML = `<span class="status-dot green"></span> Meta API Connected (${esc(conn.connectedUserName || 'Authorized')})`;
   } else if (acc.dataSource === 'uploaded_report') {
     statusEl.innerHTML = `<span class="status-dot green"></span> Viewing Uploaded Report Data`;
   } else if (acc.dataSource === 'demo_mode') {
@@ -393,7 +411,7 @@ function renderHeaderAndBanner() {
 
   document.getElementById('hdrLastSync').textContent = conn.lastSyncAt
     ? `Last Sync: ${new Date(conn.lastSyncAt).toLocaleString('en-IN')}`
-    : 'Last Sync: Live Synced';
+    : 'Last Sync: Not synced yet';
 
   // Source / Blocker Banner
   const banner = document.getElementById('sourceBanner');
@@ -407,7 +425,8 @@ function renderHeaderAndBanner() {
         You are currently viewing the isolated Demo Mode dataset. None of these sample contacts, spending figures, or ads are your actual VIMS Enterprise business data.
       </div>
       <div style="display:flex; gap:8px;">
-        <button type="button" class="btn btn-sm btn-primary" onclick="switchDataSource('meta_api')">View Live VIMS Account (BEE 1717025589122647)</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="openMetaSetupModal()">Connect Live Meta Account</button>
+        <button type="button" class="btn btn-sm btn-outline" onclick="openUploadModal()">Upload Real Meta CSV/XLSX</button>
       </div>
     `;
   } else if (acc.dataSource === 'uploaded_report') {
@@ -415,22 +434,25 @@ function renderHeaderAndBanner() {
     banner.innerHTML = `
       <div>
         <strong>UPLOADED META REPORT DATA SOURCE:</strong>
-        Showing verified figures from your imported Meta CSV/XLSX reports (${conn.dataSourcesSummary.uploaded_report.campaignsStored} campaign(s) stored).
+        Showing verified figures from your imported Meta CSV/XLSX reports (${conn.dataSourcesSummary.uploaded_report.campaignsStored} campaign(s) stored). Kept strictly separate from live API and Demo Mode.
       </div>
       <div style="display:flex; gap:8px;">
         <button type="button" class="btn btn-sm btn-primary" onclick="openUploadModal()">+ Upload Another Report</button>
-        <button type="button" class="btn btn-sm btn-outline" onclick="switchDataSource('meta_api')">Back to Live VIMS Account</button>
+        <button type="button" class="btn btn-sm btn-outline" onclick="openMetaSetupModal()">Connect Meta Graph API</button>
       </div>
     `;
-  } else if (!hasRealCampaigns && (conn.connectionStatus !== 'connected' || !conn.hasAccessToken)) {
+  } else if (conn.connectionStatus !== 'connected' || !conn.hasAccessToken) {
     banner.classList.add('blocked');
     banner.innerHTML = `
       <div>
         <strong>META API CONNECTION REQUIRED (${esc(conn.blockerCode || 'META_AUTH_REQUIRED')}):</strong>
         ${esc(conn.blockerMessage || 'Your live Meta Ad Account is not authorized yet.')}
+        <br/><span style="font-size:12px;"><strong>Next Step (Tamil/Tanglish):</strong> ${esc(conn.blockerActionTa || 'Connect Meta Account click panni Access Token authorize pannunga, alladhu Upload Report use pannunga.')}</span>
       </div>
       <div style="display:flex; gap:8px; flex-shrink:0;">
         <button type="button" class="btn btn-sm btn-primary" onclick="openMetaSetupModal()">Authorize Meta API</button>
+        <button type="button" class="btn btn-sm btn-outline" onclick="openUploadModal()">Upload Meta Report</button>
+        <button type="button" class="btn btn-sm btn-outline" onclick="switchDataSource('demo_mode')">Preview Demo Mode</button>
       </div>
     `;
   } else {
@@ -459,22 +481,23 @@ function renderFilterOptions() {
   const campSel = document.getElementById('filterCampaign');
   const adSel = document.getElementById('filterAd');
   const topAccSel = document.getElementById('topAdAccountSelect');
-  const beeAccSel = document.getElementById('mainBeeAccountSelect');
 
-  const accountsList = (opts.adAccounts && opts.adAccounts.length > 0)
-    ? opts.adAccounts
-    : (state.connection?.availableAdAccounts || []);
-  const activeAccId = state.overview.account.accountId;
+  if (topAccSel) {
+    const accountsList = (opts.adAccounts && opts.adAccounts.length > 0)
+      ? opts.adAccounts
+      : (state.connection?.availableAdAccounts || []);
+    const activeAccId = state.overview.account.accountId;
 
-  const accountOptionsHtml = accountsList.length > 0
-    ? accountsList.map(a => {
+    if (accountsList.length > 0) {
+      topAccSel.innerHTML = accountsList.map(a => {
         const id = a.account_id || a.id;
-        return `<option value="${esc(id)}" ${id === activeAccId ? 'selected' : ''}>${esc(a.name)}</option>`;
-      }).join('')
-    : `<option value="${esc(activeAccId)}">${esc(state.overview.account.name)}</option>`;
-
-  if (topAccSel) topAccSel.innerHTML = accountOptionsHtml;
-  if (beeAccSel) beeAccSel.innerHTML = accountOptionsHtml;
+        const label = `${a.name} (${id})`;
+        return `<option value="${esc(id)}" ${id === activeAccId ? 'selected' : ''}>${esc(label)}</option>`;
+      }).join('');
+    } else {
+      topAccSel.innerHTML = `<option value="${esc(activeAccId)}">${esc(state.overview.account.name)}</option>`;
+    }
+  }
 
   const currentCamp = state.filters.campaignId;
   campSel.innerHTML = `<option value="">All Campaigns (${opts.campaigns.length})</option>` +
@@ -494,82 +517,27 @@ function renderFilterOptions() {
 
   // Also populate planned budget modal campaign dropdown
   const planCampSel = document.getElementById('planScopeCampaign');
-  if (planCampSel) {
-    planCampSel.innerHTML = `<option value="">Select Campaign...</option>` +
-      opts.campaigns.map(c => `<option value="${esc(c.campaign_id)}">${esc(c.name)}</option>`).join('');
-  }
-}
-
-window.promptMorningBudget = function() {
-  const accId = state.overview?.account?.accountId || 'act_1717025589122647';
-  const cur = state.overview?.account?.currency || 'INR';
-  const currentMorning = getEffectiveMorningBudget();
-  const input = window.prompt(
-    `காலையில பட்ஜெட் (Enter Today's Morning Opening Budget in ${cur}):\nEvening Balance will automatically subtract Today's 1-Day Spend from this amount.`,
-    String(currentMorning)
-  );
-  if (input === null) return;
-  const val = Number(input.replace(/[^0-9.]/g, ''));
-  if (Number.isFinite(val) && val >= 0) {
-    localStorage.setItem(`vims_morning_budget_${accId}`, String(val));
-    renderSummaryCards();
-  }
-};
-
-function getEffectiveMorningBudget() {
-  const accId = state.overview?.account?.accountId || 'act_1717025589122647';
-  const saved = localStorage.getItem(`vims_morning_budget_${accId}`);
-  if (saved !== null && saved !== '' && Number.isFinite(Number(saved))) {
-    return Number(saved);
-  }
-  const sc = state.overview?.summaryCards || {};
-  const fc = state.overview?.financialClarity || {};
-  const verifiedAvail = fc.verifiedMetaBilling?.availableFundsVerified;
-  const todaySpend = Number(sc.todayActualSpend || 0);
-  if (verifiedAvail !== null && verifiedAvail !== undefined && Number.isFinite(Number(verifiedAvail))) {
-    return Number((Number(verifiedAvail) + todaySpend).toFixed(2));
-  }
-  const dailyBudgetTotal = Number(fc.metaConfiguredBudget?.activeDailyBudgetTotal || 0);
-  return dailyBudgetTotal > 0 ? dailyBudgetTotal : 5000;
+  planCampSel.innerHTML = `<option value="">Select Campaign...</option>` +
+    opts.campaigns.map(c => `<option value="${esc(c.campaign_id)}">${esc(c.name)}</option>`).join('');
 }
 
 function renderSummaryCards() {
   const sc = state.overview.summaryCards;
   const cmp = state.overview.comparison;
   const cur = state.overview.account.currency;
-  const fc = state.overview.financialClarity;
 
   document.getElementById('kpiActiveCampaigns').textContent = fmtInt(sc.activeCampaignsNow);
-  document.getElementById('kpiTotalCampaignsSub').textContent = `Out of ${fmtInt(sc.totalCampaignsStored)} total stored campaigns`;
+  document.getElementById('kpiTotalCampaignsSub').textContent = `Out of ${fmtInt(sc.totalCampaignsStored)} total stored campaigns (incl. paused/completed)`;
 
   document.getElementById('kpiActiveAds').textContent = fmtInt(sc.activeAdsNow);
   document.getElementById('kpiTotalAdsSub').textContent = `Counted separately • ${fmtInt(sc.totalAdsStored)} total stored ads`;
 
   document.getElementById('kpiTodayDateTag').textContent = `Today (${state.overview.dateRange.todayDate})`;
   document.getElementById('kpiTodaySpend').textContent = fmtMoney(sc.todayActualSpend, cur);
+  const todayCplText = fmtCpl(typeof sc.todayCplDisplay === 'number' ? sc.todayCplDisplay : null, sc.todayCplDisplay, cur);
   const todayReachStr = (sc.todayReach !== null && sc.todayReach !== undefined) ? fmtInt(sc.todayReach) : '0';
-  document.getElementById('kpiTodayLeadsSub').textContent = `1-Day Reach: ${todayReachStr}`;
-
-  // Morning Opening Budget -> Today Spend -> Evening Remaining Balance
-  const morningBudget = getEffectiveMorningBudget();
-  const todaySpend = Number(sc.todayActualSpend || 0);
-  const eveningBalance = Number((morningBudget - todaySpend).toFixed(2));
-  const dailyLimitSum = Number(fc.metaConfiguredBudget?.activeDailyBudgetTotal || 0);
-
-  const morningEl = document.getElementById('topMorningBudgetVal');
-  const morningSubEl = document.getElementById('topMorningBudgetSub');
-  const eveningEl = document.getElementById('topEveningBalanceVal');
-  const eveningCalcEl = document.getElementById('topEveningBalanceCalc');
-
-  if (morningEl) morningEl.textContent = fmtMoney(morningBudget, cur);
-  if (morningSubEl) morningSubEl.textContent = `Daily Ads Limit: ${fmtMoney(dailyLimitSum, cur)} / day`;
-  if (eveningEl) {
-    eveningEl.textContent = fmtMoney(eveningBalance, cur);
-    eveningEl.style.color = eveningBalance < 0 ? '#ef4444' : '#ffffff';
-  }
-  if (eveningCalcEl) {
-    eveningCalcEl.innerHTML = `(Morning <strong>${fmtMoney(morningBudget, cur)}</strong> − Today <strong>${fmtMoney(todaySpend, cur)}</strong>)`;
-  }
+  document.getElementById('kpiTodayLeadsSub').textContent =
+    `1-Day Reach: ${todayReachStr} • Today's Leads: ${fmtInt(sc.todayFormLeads)} (CPL: ${todayCplText})`;
 
   document.getElementById('kpiPeriodSpend').textContent = fmtMoney(sc.periodActualSpend, cur);
   document.getElementById('kpiPeriodSpendDelta').innerHTML = formatDeltaHtml(cmp.deltas.spendPercent, 'vs previous period', false);
@@ -581,7 +549,7 @@ function renderSummaryCards() {
 
   document.getElementById('kpiPeriodLinkClicks').textContent = fmtInt(sc.periodLinkClicks);
   const cpcText = typeof sc.periodLinkCpcDisplay === 'number' ? fmtMoney(sc.periodLinkCpcDisplay, cur) : sc.periodLinkCpcDisplay;
-  document.getElementById('kpiPeriodCtrCpcSub').textContent = `(▲ CTR: ${sc.periodLinkCtrDisplay} • CPC: ${cpcText})`;
+  document.getElementById('kpiPeriodCtrCpcSub').textContent = `Link CTR: ${sc.periodLinkCtrDisplay} | Link CPC: ${cpcText} (All Clicks: ${fmtInt(sc.periodClicksAll)})`;
 
   document.getElementById('kpiPeriodFormLeads').textContent = fmtInt(sc.periodReportedFormLeads);
   document.getElementById('kpiPeriodLeadsDelta').innerHTML = formatDeltaHtml(cmp.deltas.formLeadsPercent, 'vs previous period', true);
@@ -589,7 +557,20 @@ function renderSummaryCards() {
   document.getElementById('kpiPeriodCpl').textContent = fmtCpl(sc.periodCpl, sc.periodCplDisplay, cur);
   document.getElementById('kpiPeriodCplDelta').innerHTML = sc.periodReportedFormLeads > 0
     ? formatDeltaHtml(cmp.deltas.cplPercent, 'vs previous period CPL', false, true)
-    : 'No reported form leads in this period';
+    : 'No reported form leads in this period (never shown as ₹0)';
+
+  const fc = state.overview.financialClarity.activePlanSummary;
+  const remEl = document.getElementById('kpiPlannedRemaining');
+  const remSub = document.getElementById('kpiPlannedSub');
+  if (fc.hasPlan) {
+    remEl.textContent = fmtMoney(fc.remainingAmount, cur);
+    remEl.style.color = fc.isExceeded ? '#dc2626' : '#0f172a';
+    remSub.innerHTML = `${esc(fc.statusLabel)} of ${fmtMoney(fc.plannedAmount, cur)} plan • <a href="#financialSection" style="color:#1d4ed8;font-weight:600;">Details ↓</a>`;
+  } else {
+    remEl.textContent = 'No Plan Set';
+    remEl.style.color = '#64748b';
+    remSub.innerHTML = `<a href="#financialSection" onclick="openBudgetModal()" style="color:#1d4ed8;font-weight:600;">+ Enter a spending plan</a>`;
+  }
 }
 
 function formatDeltaHtml(deltaPercent, label, higherIsBetter = true, lowerIsBetter = false) {
@@ -609,179 +590,151 @@ function formatDeltaHtml(deltaPercent, label, higherIsBetter = true, lowerIsBett
 }
 
 // ============================================================================
-// 3. Visual Charts (Matches Screenshot 1: Dual Line Chart + Horizontal Campaign Bars)
+// 3. SVG Daily Charts (Spend, Form Leads, Cost Per Form Lead)
 // ============================================================================
 
 function renderDailyCharts() {
   const daily = state.overview.dailyChart || [];
   const cur = state.overview.account.currency;
-  const camps = state.overview.campaignsTable || [];
+  const cmp = state.overview.comparison;
 
-  renderDualTrendSvgChart({
+  document.getElementById('chartComparisonSubtitle').textContent =
+    `${cmp.statusLabel}. Days with 0 leads are omitted from the CPL curve so zero-lead days are never plotted as ₹0 CPL.`;
+
+  renderSingleSvgChart({
     containerId: 'chartSpendWrap',
     data: daily,
-    cur
+    valueKey: 'spend',
+    prevKey: 'prevSpend',
+    color: '#1d4ed8',
+    formatVal: (v) => fmtMoney(v, cur),
+    allowZero: true
   });
 
-  renderCampaignHorizontalBars({
-    containerId: 'chartCampaignBarsWrap',
-    campaigns: camps,
-    cur
+  renderSingleSvgChart({
+    containerId: 'chartLeadsWrap',
+    data: daily,
+    valueKey: 'formLeads',
+    prevKey: 'prevFormLeads',
+    color: '#059669',
+    formatVal: (v) => `${v} leads`,
+    allowZero: true
+  });
+
+  renderSingleSvgChart({
+    containerId: 'chartCplWrap',
+    data: daily,
+    valueKey: 'cpl',
+    prevKey: 'prevCpl',
+    color: '#d97706',
+    formatVal: (v) => (v !== null ? fmtMoney(v, cur) : '— / No leads'),
+    allowZero: false
   });
 }
 
-function renderDualTrendSvgChart({ containerId, data, cur }) {
+function renderSingleSvgChart({ containerId, data, valueKey, prevKey, color, formatVal, allowZero }) {
   const wrap = document.getElementById(containerId);
-  if (!wrap) return;
-  const activeDays = (data || []).filter(d => d.spend > 0 || d.impressions > 0);
-  const plotData = activeDays.length >= 3 ? activeDays : (data || []).slice(-10);
-
-  if (plotData.length === 0) {
+  if (!data || data.length === 0) {
     wrap.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12.5px;">No daily records in selected period</div>`;
     return;
   }
 
-  const width = 560;
-  const height = 215;
-  const padLeft = 56;
-  const padRight = 18;
+  const width = 460;
+  const height = 200;
+  const padLeft = 52;
+  const padRight = 16;
   const padTop = 16;
-  const padBottom = 42;
+  const padBottom = 30;
   const plotW = width - padLeft - padRight;
   const plotH = height - padTop - padBottom;
 
-  const maxSpend = Math.max(...plotData.map(d => Number(d.spend || 0)), 100);
-  const maxImpScaled = Math.max(...plotData.map(d => Number(d.impressions || 0) * 0.15), maxSpend * 1.25);
-  const maxVal = Math.max(maxSpend * 1.35, maxImpScaled, 500);
+  const vals = [];
+  data.forEach(d => {
+    const v = d[valueKey];
+    if (v !== null && v !== undefined && (allowZero || v > 0)) vals.push(Number(v));
+    if (state.showPreviousOverlay) {
+      const pv = d[prevKey];
+      if (pv !== null && pv !== undefined && (allowZero || pv > 0)) vals.push(Number(pv));
+    }
+  });
 
-  const xForIdx = (i) => padLeft + (plotData.length <= 1 ? plotW / 2 : (i / (plotData.length - 1)) * plotW);
+  if (vals.length === 0) {
+    wrap.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12.5px;">No non-zero values in selected window</div>`;
+    return;
+  }
+
+  const maxVal = Math.max(...vals, 1);
+  const xForIdx = (i) => padLeft + (data.length <= 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
   const yForVal = (v) => padTop + plotH - (Math.min(maxVal, Math.max(0, v)) / maxVal) * plotH;
 
-  const gridTicks = [0, 0.33, 0.66, 1];
+  // Grid lines
+  const gridTicks = [0, 0.5, 1];
   const gridHtml = gridTicks.map(t => {
     const val = maxVal * t;
     const y = yForVal(val);
-    const label = `₹${val >= 1000 ? `${(val / 1000).toFixed(1)}k` : Math.round(val)}`;
+    const label = val >= 1000 ? `${(val / 1000).toFixed(1)}k` : Math.round(val);
     return `
-      <line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" stroke="#2e3a4d" stroke-width="1" />
-      <text x="${padLeft - 8}" y="${y + 4}" text-anchor="end" font-size="10.5" fill="#94a3b8">${label}</text>
+      <line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" stroke="#e2e8f0" stroke-dasharray="3,3" />
+      <text x="${padLeft - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#64748b">${label}</text>
     `;
   }).join('');
 
-  // Dashed daily budget reference line
-  const avgSpend = plotData.reduce((s, d) => s + Number(d.spend || 0), 0) / Math.max(1, plotData.length);
-  const budgetLineY = yForVal(avgSpend * 1.15);
-  const dashedBudgetHtml = `<line x1="${padLeft}" y1="${budgetLineY}" x2="${width - padRight}" y2="${budgetLineY}" stroke="#34d399" stroke-width="1.3" stroke-dasharray="4,4" opacity="0.7" />`;
+  // Build path segments (breaks cleanly when value is null, e.g. 0 leads on CPL chart)
+  function buildPathSegments(key) {
+    const segments = [];
+    let current = [];
+    data.forEach((d, idx) => {
+      const v = d[key];
+      const valid = v !== null && v !== undefined && (allowZero || v > 0);
+      if (valid) {
+        current.push({ x: xForIdx(idx), y: yForVal(Number(v)), d, v: Number(v) });
+      } else if (current.length > 0) {
+        segments.push(current);
+        current = [];
+      }
+    });
+    if (current.length > 0) segments.push(current);
+    return segments;
+  }
 
-  // Green Line: Daily Spend (₹)
-  const spendPts = plotData.map((d, i) => ({ x: xForIdx(i), y: yForVal(Number(d.spend || 0)), d }));
-  const spendPath = spendPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const currSegments = buildPathSegments(valueKey);
+  const prevSegments = state.showPreviousOverlay ? buildPathSegments(prevKey) : [];
 
-  // Cyan Line: Daily Reach / Value Index
-  const reachPts = plotData.map((d, i) => {
-    const val = Math.max(Number(d.spend || 0) * 1.32 + (Number(d.formLeads || 0) * 85), Number(d.impressions || 0) * 0.12);
-    return { x: xForIdx(i), y: yForVal(val), d };
-  });
-  const reachPath = reachPts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-
-  const xLabelsHtml = plotData.map((d, idx) => {
-    const x = xForIdx(idx);
-    const parts = d.date.split('-');
-    const shortDate = `${parts[2]} Nov`;
-    return `<text x="${x}" y="${height - 22}" text-anchor="middle" font-size="10" fill="#94a3b8">${shortDate}</text>`;
+  const prevPathsHtml = prevSegments.map(seg => {
+    if (seg.length === 1) {
+      return `<circle cx="${seg[0].x}" cy="${seg[0].y}" r="3" fill="#94a3b8" />`;
+    }
+    const dAttr = seg.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    return `<path d="${dAttr}" fill="none" stroke="#94a3b8" stroke-width="1.75" stroke-dasharray="4,3" />`;
   }).join('');
 
-  const legendHtml = `
-    <g transform="translate(${width / 2 - 110}, ${height - 6})">
-      <line x1="0" y1="-4" x2="18" y2="-4" stroke="#00e5ff" stroke-width="2.5" />
-      <text x="24" y="0" font-size="11" fill="#cbd5e1">Reach &amp; Results</text>
-      <line x1="125" y1="-4" x2="143" y2="-4" stroke="#34d399" stroke-width="2.5" />
-      <text x="149" y="0" font-size="11" fill="#cbd5e1">Spend (₹)</text>
-    </g>
-  `;
+  const currPathsHtml = currSegments.map(seg => {
+    const dAttr = seg.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    const dots = seg.map(p =>
+      `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.2" fill="${color}">
+        <title>${p.d.date}: ${formatVal(p.v)}${p.d[prevKey] !== null ? ` (Prev ${p.d.prevDate}: ${formatVal(p.d[prevKey])})` : ''}</title>
+      </circle>`
+    ).join('');
+    return `${seg.length > 1 ? `<path d="${dAttr}" fill="none" stroke="${color}" stroke-width="2.4" />` : ''}${dots}`;
+  }).join('');
+
+  // X-axis date labels (start, middle, end)
+  const labelIndices = data.length <= 3
+    ? data.map((_, i) => i)
+    : [0, Math.floor((data.length - 1) / 2), data.length - 1];
+
+  const xLabelsHtml = labelIndices.map(idx => {
+    const x = xForIdx(idx);
+    const anchor = idx === 0 ? 'start' : idx === data.length - 1 ? 'end' : 'middle';
+    return `<text x="${x}" y="${height - 8}" text-anchor="${anchor}" font-size="10" fill="#64748b">${data[idx].date.slice(5)}</text>`;
+  }).join('');
 
   wrap.innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" style="overflow: visible;">
       ${gridHtml}
-      ${dashedBudgetHtml}
-      <path d="${reachPath}" fill="none" stroke="#00e5ff" stroke-width="2.6" stroke-linejoin="round" />
-      <path d="${spendPath}" fill="none" stroke="#34d399" stroke-width="2.4" stroke-linejoin="round" />
-      ${spendPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.2" fill="#34d399"><title>${p.d.date}: Spend ${fmtMoney(p.d.spend, cur)} | Leads: ${p.d.formLeads}</title></circle>`).join('')}
-      ${reachPts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.2" fill="#00e5ff"><title>${p.d.date}: Impressions ${fmtInt(p.d.impressions)} | Leads: ${p.d.formLeads}</title></circle>`).join('')}
+      ${prevPathsHtml}
+      ${currPathsHtml}
       ${xLabelsHtml}
-      ${legendHtml}
-    </svg>
-  `;
-}
-
-function renderCampaignHorizontalBars({ containerId, campaigns, cur }) {
-  const wrap = document.getElementById(containerId);
-  if (!wrap) return;
-  const topCamps = [...(campaigns || [])]
-    .sort((a, b) => (b.spend + (b.reach || 0) * 0.05) - (a.spend + (a.reach || 0) * 0.05))
-    .slice(0, 5);
-
-  if (topCamps.length === 0) {
-    wrap.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:12.5px;">No campaigns to chart</div>`;
-    return;
-  }
-
-  const width = 560;
-  const height = 215;
-  const padLeft = 175;
-  const padRight = 68;
-  const padTop = 10;
-  const padBottom = 32;
-  const plotW = width - padLeft - padRight;
-  const plotH = height - padTop - padBottom;
-
-  const scores = topCamps.map(c => {
-    const spendVal = Math.max(Number(c.spend || 0), 80);
-    const reachOrLeadVal = c.formLeads > 0 ? c.formLeads * 240 : Math.max(Number(c.reach || 0) * 0.15, 120);
-    return { c, spendVal, reachOrLeadVal, total: spendVal + reachOrLeadVal };
-  });
-  const maxTotal = Math.max(...scores.map(s => s.total), 500);
-  const rowH = plotH / scores.length;
-
-  const barsHtml = scores.map((s, idx) => {
-    const yCenter = padTop + idx * rowH + rowH / 2;
-    const barH = Math.min(22, rowH * 0.62);
-    const yTop = yCenter - barH / 2;
-    const greenW = Math.max(12, (s.spendVal / maxTotal) * plotW);
-    const cyanW = Math.max(14, (s.reachOrLeadVal / maxTotal) * plotW);
-    const shortName = s.c.name.length > 24 ? s.c.name.slice(0, 22) + '…' : s.c.name;
-    const rightBadge = s.c.formLeads > 0
-      ? `${s.c.formLeads} Leads`
-      : s.c.reach > 0
-        ? `${fmtInt(s.c.reach)} Reach`
-        : 'Active';
-
-    return `
-      <text x="${padLeft - 10}" y="${yCenter + 4}" text-anchor="end" font-size="11.5" fill="#cbd5e1" font-weight="600">${esc(shortName)}</text>
-      <rect x="${padLeft}" y="${yTop}" width="${greenW.toFixed(1)}" height="${barH}" fill="#34d399" rx="2">
-        <title>${esc(s.c.name)} — Spend: ${fmtMoney(s.c.spend, cur)}</title>
-      </rect>
-      <rect x="${(padLeft + greenW).toFixed(1)}" y="${yTop}" width="${cyanW.toFixed(1)}" height="${barH}" fill="#00e5ff" rx="2">
-        <title>${esc(s.c.name)} — Results: ${rightBadge}</title>
-      </rect>
-      <text x="${(padLeft + greenW + cyanW + 8).toFixed(1)}" y="${yCenter + 4}" font-size="11.5" font-weight="700" fill="#ffffff">${esc(rightBadge)}</text>
-    `;
-  }).join('');
-
-  const legendHtml = `
-    <g transform="translate(${padLeft + 20}, ${height - 6})">
-      <rect x="0" y="-9" width="10" height="10" fill="#34d399" rx="2" />
-      <text x="15" y="0" font-size="11" fill="#cbd5e1">Spend (₹)</text>
-      <rect x="95" y="-9" width="10" height="10" fill="#00e5ff" rx="2" />
-      <text x="110" y="0" font-size="11" fill="#cbd5e1">Results (Leads / Reach)</text>
-    </g>
-  `;
-
-  wrap.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" style="overflow: visible;">
-      <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${height - padBottom}" stroke="#3b4961" stroke-width="1.2" />
-      ${barsHtml}
-      ${legendHtml}
     </svg>
   `;
 }
@@ -872,6 +825,7 @@ function renderOnOffSwitchHtml(entityType, entityId, effectiveStatus) {
   const isOn = String(effectiveStatus || '').toUpperCase() === 'ACTIVE';
   const nextStatus = isOn ? 'PAUSED' : 'ACTIVE';
   const btnCls = isOn ? 'is-on' : 'is-off';
+  const label = isOn ? 'ON (Active)' : 'OFF (Paused)';
   return `
     <div class="onoff-switch-wrap" onclick="event.stopPropagation();">
       <button
@@ -881,6 +835,7 @@ function renderOnOffSwitchHtml(entityType, entityId, effectiveStatus) {
         title="Click to turn ${isOn ? 'OFF (Pause in Meta Ads Manager)' : 'ON (Activate in Meta Ads Manager)'}"
       >
         <span class="onoff-dot"></span>
+        <span>${label}</span>
       </button>
     </div>
   `;
@@ -911,206 +866,20 @@ window.toggleEntityOnOff = async function(entityType, entityId, newStatus, btnEl
   }
 };
 
-window.switchMainViewTab = function(tabName) {
-  const tabs = ['campaigns', 'adsets', 'ads', 'leads'];
-  const btnMap = {
-    campaigns: 'tabBtnCampaigns',
-    adsets: 'tabBtnAdsets',
-    ads: 'tabBtnAds',
-    leads: 'tabBtnLeads'
-  };
-  tabs.forEach(t => {
-    const btn = document.getElementById(btnMap[t]);
-    if (btn) btn.classList.toggle('active', t === tabName);
-  });
-
-  const campWrap = document.getElementById('campaignsTableWrap');
-  const adsetWrap = document.getElementById('adsetsTableWrap');
-  const adsWrap = document.getElementById('adsTableWrap');
-  const leadsWrap = document.getElementById('mainLeadsSectionWrap');
-
-  if (campWrap) campWrap.classList.toggle('hidden', tabName !== 'campaigns');
-  if (adsetWrap) adsetWrap.classList.toggle('hidden', tabName !== 'adsets');
-  if (adsWrap) adsWrap.classList.toggle('hidden', tabName !== 'ads');
-  if (leadsWrap) leadsWrap.classList.toggle('hidden', tabName !== 'leads');
-};
-
-window.applyQuickDeliveryFilter = async function(mode) {
-  state.quickDeliveryMode = mode;
-  ['pillAllAds', 'pillHadDelivery', 'pillActiveAds'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.classList.remove('active');
-  });
-  const activeId = mode === 'DELIVERY' ? 'pillHadDelivery' : mode === 'ACTIVE' ? 'pillActiveAds' : 'pillAllAds';
-  const activeEl = document.getElementById(activeId);
-  if (activeEl) activeEl.classList.add('active');
-
-  if (mode === 'ACTIVE') {
-    state.filters.status = 'ACTIVE';
-  } else {
-    state.filters.status = 'ALL';
-  }
-  const statusSel = document.getElementById('filterStatus');
-  if (statusSel) statusSel.value = state.filters.status;
-  await loadDashboard();
-};
-
 function renderPerformanceTables() {
   const cur = state.overview.account.currency;
   const sc = state.overview.summaryCards;
 
-  let rawAds = state.overview.adsTable || [];
-  let rawCamps = state.overview.campaignsTable || [];
+  const ads = sortArray(state.overview.adsTable || [], state.adSort.key, state.adSort.dir);
+  const camps = sortArray(state.overview.campaignsTable || [], state.campSort.key, state.campSort.dir);
 
-  if (state.quickDeliveryMode === 'DELIVERY') {
-    rawAds = rawAds.filter(a => a.spend > 0 || a.impressions > 0);
-    rawCamps = rawCamps.filter(c => c.spend > 0 || c.impressions > 0);
-  }
+  document.getElementById('countAdsTab').textContent = ads.length;
+  document.getElementById('countCampaignsTab').textContent = camps.length;
 
-  const ads = state.adSort.userClicked
-    ? sortArray(rawAds, state.adSort.key, state.adSort.dir)
-    : rawAds;
-  const camps = state.campSort.userClicked
-    ? sortArray(rawCamps, state.campSort.key, state.campSort.dir)
-    : rawCamps;
-
-  const countAdsEl = document.getElementById('countAdsTab');
-  const countCampsEl = document.getElementById('countCampaignsTab');
-  const countAdsetsEl = document.getElementById('countAdsetsTab');
-  const countLeadsEl = document.getElementById('countLeadsTab');
-
-  if (countAdsEl) countAdsEl.textContent = ads.length;
-  if (countCampsEl) countCampsEl.textContent = camps.length;
-  if (countAdsetsEl) countAdsetsEl.textContent = camps.length;
-  if (countLeadsEl) countLeadsEl.textContent = (state.overview.leadsSection?.leads || []).length;
-
-  // 1. Render Campaigns Breakdown Table (Matches Screenshot 1 & 2!)
-  const campsBody = document.getElementById('campaignsTableBody');
-  if (camps.length === 0) {
-    campsBody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:28px;color:#94a3b8;">No campaigns match the active filters.</td></tr>`;
-  } else {
-    campsBody.innerHTML = camps.map(c => {
-      const budgetText = c.dailyBudget
-        ? `${fmtMoney(c.dailyBudget, cur)} Daily`
-        : c.lifetimeBudget
-          ? `${fmtMoney(c.lifetimeBudget, cur)} Lifetime`
-          : `Using ad set budget`;
-
-      const recText = (c.name === 'bike ad' || c.name.includes('JillJill'))
-        ? '↑ 2 recommendations'
-        : '↑ 1 recommendation';
-
-      const impCell = c.impressions > 0 ? fmtInt(c.impressions) : '—';
-      const reachCell = (c.reach !== null && c.reach > 0) ? fmtInt(c.reach) : '—';
-      const cpmCell = c.cpm !== null ? fmtMoney(c.cpm, cur) : '—';
-      const clicksCell = c.linkClicks > 0 ? fmtInt(c.linkClicks) : '—';
-
-      // Match Screenshot 2 exact Result & Cost per result display for Reach vs Lead (Form) campaigns
-      let resultsHtml = `<div>—</div><div style="font-size:11px;color:#94a3b8;">Lead (Form)</div>`;
-      let costPerResultHtml = `<div>—</div><div style="font-size:11px;color:#94a3b8;">Per lead (form)</div>`;
-
-      if (c.formLeads > 0) {
-        resultsHtml = `<div><strong style="color:#34d399;font-size:14px;">${fmtInt(c.formLeads)}</strong></div><div style="font-size:11px;color:#94a3b8;">Lead (Form)</div>`;
-        costPerResultHtml = `<div><strong style="color:#ffffff;">${esc(fmtCpl(c.cpl, c.cplDisplay, cur))}</strong></div><div style="font-size:11px;color:#94a3b8;">Per lead (form)</div>`;
-      } else if (c.reach > 0 && (c.name === 'car ad' || c.name === 'bike ad' || String(c.objective).includes('AWARENESS'))) {
-        const cpr1k = Number(((c.spend / c.reach) * 1000).toFixed(2));
-        resultsHtml = `<div><strong style="color:#00e5ff;font-size:14px;">${fmtInt(c.reach)}</strong></div><div style="font-size:11px;color:#94a3b8;">Reach</div>`;
-        costPerResultHtml = `<div><strong style="color:#ffffff;">${fmtMoney(cpr1k, cur)}</strong></div><div style="font-size:11px;color:#94a3b8;">Per 1,000 people reached</div>`;
-      }
-
-      return `
-        <tr>
-          <td>
-            ${renderOnOffSwitchHtml('campaign', c.campaignId, c.effectiveStatus)}
-          </td>
-          <td>
-            <div style="font-weight:700;color:#60a5fa;cursor:pointer;font-size:13.5px;" onclick="filterByCampaignAndShowAds('${esc(c.campaignId)}')">${esc(c.name)}</div>
-            <div style="font-size:11px;color:#94a3b8;">7-day click or 1-day view • Ongoing</div>
-          </td>
-          <td>${statusBadgeHtml(c.effectiveStatus)}</td>
-          <td><span class="rec-pill">${recText}</span></td>
-          <td class="num">
-            <div style="color:#cbd5e1;font-weight:600;">${esc(budgetText)}</div>
-            <div style="font-size:11px;color:#fbbf24;">1-Day Spend: ${fmtMoney(c.todaySpend || 0, cur)}</div>
-          </td>
-          <td class="num">
-            <span style="color:#34d399;font-weight:700;margin-right:4px;">₹</span><strong>${fmtMoney(c.spend, cur)}</strong>
-          </td>
-          <td class="num">${impCell}</td>
-          <td class="num">${reachCell}</td>
-          <td class="num">${cpmCell}</td>
-          <td class="num">${clicksCell}</td>
-          <td class="num">${resultsHtml}</td>
-          <td class="num">${costPerResultHtml}</td>
-        </tr>
-      `;
-    }).join('');
-  }
-
-  document.getElementById('campaignsTableFoot').innerHTML = `
-    <tr>
-      <td colspan="4"><strong>Results from ${camps.length} campaigns</strong></td>
-      <td class="num">1-Day Today: <strong>${fmtMoney(sc.todayActualSpend, cur)}</strong></td>
-      <td class="num"><strong>${fmtMoney(sc.periodActualSpend, cur)}</strong></td>
-      <td class="num"><strong>${sc.periodImpressions > 0 ? fmtInt(sc.periodImpressions) : '—'}</strong></td>
-      <td class="num"><strong>${sc.periodReach ? fmtInt(sc.periodReach) : '—'}</strong></td>
-      <td class="num">—</td>
-      <td class="num"><strong>${fmtInt(sc.periodLinkClicks)}</strong></td>
-      <td class="num"><strong>${fmtInt(sc.periodReportedFormLeads)} Leads</strong></td>
-      <td class="num"><strong>${esc(fmtCpl(sc.periodCpl, sc.periodCplDisplay, cur))}</strong></td>
-    </tr>
-  `;
-
-  // 2. Render Ad Sets Table
-  const adsetsBody = document.getElementById('adsetsTableBody');
-  const adsetsFoot = document.getElementById('adsetsTableFoot');
-  if (adsetsBody) {
-    adsetsBody.innerHTML = ads.map(ad => {
-      const impCell = ad.impressions > 0 ? fmtInt(ad.impressions) : '—';
-      const reachCell = (ad.reach !== null && ad.reach > 0) ? fmtInt(ad.reach) : '—';
-      const leadsCell = ad.formLeads > 0
-        ? `<strong style="color:#34d399;">${fmtInt(ad.formLeads)} Leads</strong>`
-        : ad.reach > 0
-          ? `<strong style="color:#00e5ff;">${fmtInt(ad.reach)} Reach</strong>`
-          : '—';
-      return `
-        <tr>
-          <td>${renderOnOffSwitchHtml('adset', ad.adsetId, ad.effectiveStatus)}</td>
-          <td>
-            <div style="font-weight:700;color:#ffffff;">${esc(ad.adsetName)}</div>
-            <div style="font-size:11px;color:#94a3b8;">ID: ${esc(ad.adsetId)}</div>
-          </td>
-          <td>${esc(ad.campaignName)}</td>
-          <td>${statusBadgeHtml(ad.effectiveStatus)}</td>
-          <td class="num"><strong>₹100.00+</strong> <span style="font-size:11px;color:#94a3b8;">Daily</span></td>
-          <td class="num"><strong>${fmtMoney(ad.todaySpend || 0, cur)}</strong></td>
-          <td class="num"><strong>${fmtMoney(ad.spend, cur)}</strong></td>
-          <td class="num">${impCell}</td>
-          <td class="num">${reachCell}</td>
-          <td class="num">${leadsCell}</td>
-          <td>Ongoing</td>
-        </tr>
-      `;
-    }).join('');
-    if (adsetsFoot) {
-      adsetsFoot.innerHTML = `
-        <tr>
-          <td colspan="5"><strong>Results from ${ads.length} ad sets</strong></td>
-          <td class="num"><strong>${fmtMoney(sc.todayActualSpend, cur)}</strong></td>
-          <td class="num"><strong>${fmtMoney(sc.periodActualSpend, cur)}</strong></td>
-          <td class="num"><strong>${fmtInt(sc.periodImpressions)}</strong></td>
-          <td class="num"><strong>${sc.periodReach ? fmtInt(sc.periodReach) : '—'}</strong></td>
-          <td class="num"><strong>${fmtInt(sc.periodReportedFormLeads)} Leads</strong></td>
-          <td>Ongoing</td>
-        </tr>
-      `;
-    }
-  }
-
-  // 3. Render Individual Ads Table
+  // Render Individual Ads Table
   const adsBody = document.getElementById('adsTableBody');
   if (ads.length === 0) {
-    adsBody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:28px;color:#94a3b8;">No individual ads match the active filters.</td></tr>`;
+    adsBody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:28px;color:#64748b;">No individual ads match the active filters in this data source.</td></tr>`;
   } else {
     adsBody.innerHTML = ads.map(ad => {
       const thumb = ad.creative?.thumbnailUrl || '';
@@ -1118,16 +887,18 @@ function renderPerformanceTables() {
         ? `<img src="${esc(thumb)}" alt="Ad Preview" class="ad-thumb-img" />`
         : `<div class="ad-thumb-img" style="display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:10px;font-weight:700;">${esc(ad.creative?.mediaType || 'AD')}</div>`;
 
-      const impCell = ad.impressions > 0 ? fmtInt(ad.impressions) : '—';
-      const reachCell = (ad.reach !== null && ad.reach > 0) ? fmtInt(ad.reach) : '—';
-      const leadsCell = ad.formLeads > 0
-        ? `<strong style="color:#34d399;">${fmtInt(ad.formLeads)} Leads</strong>`
-        : ad.reach > 0
-          ? `<strong style="color:#00e5ff;">${fmtInt(ad.reach)} Reach</strong>`
-          : '—';
-      const cplCell = ad.formLeads > 0
+      const isLeadObj = String(ad.campaignObjective).toUpperCase().includes('LEAD');
+      const formLeadsCell = isLeadObj
+        ? `<strong>${fmtInt(ad.formLeads)}</strong>`
+        : `<span style="color:#64748b;" title="Non-lead campaign objective">${fmtInt(ad.formLeads)}</span>`;
+
+      const cplCell = isLeadObj
         ? `<strong>${esc(fmtCpl(ad.cpl, ad.cplDisplay, cur))}</strong>`
-        : (ad.reach > 0 ? `<strong>${fmtMoney((ad.spend / ad.reach) * 1000, cur)} / 1k</strong>` : '—');
+        : `<span style="color:#64748b;">N/A (${esc(ad.resultType)})</span>`;
+
+      const primaryResultCpr = typeof ad.costPerResultDisplay === 'number'
+        ? fmtMoney(ad.costPerResultDisplay, cur)
+        : ad.costPerResultDisplay;
 
       return `
         <tr class="clickable-row" onclick="openAdDetailDrawer('${esc(ad.adId)}')" title="Click to view creative preview, ad copy & daily breakdown">
@@ -1138,29 +909,32 @@ function renderPerformanceTables() {
             <div class="ad-thumb-cell">
               ${thumbImg}
               <div>
-                <div style="font-weight:700;color:#60a5fa;">${esc(ad.name)}</div>
-                <div style="font-size:11px;color:#94a3b8;">ID: ${esc(ad.adId)}</div>
+                <div style="font-weight:700;color:#1d4ed8;">${esc(ad.name)}</div>
+                <div style="font-size:11.5px;color:#64748b;">ID: ${esc(ad.adId)} • ${esc(ad.objectiveLabel)}</div>
               </div>
             </div>
           </td>
           <td>
-            <div style="font-weight:600;color:#e2e8f0;">${esc(ad.campaignName)}</div>
-            <div style="font-size:11px;color:#94a3b8;">Ad Set: ${esc(ad.adsetName)}</div>
+            <div style="font-weight:600;">${esc(ad.campaignName)}</div>
+            <div style="font-size:11.5px;color:#64748b;">Ad Set: ${esc(ad.adsetName)}</div>
           </td>
-          <td class="num">
+          <td class="num" style="background:#f8fafc;">
             <div><strong>${fmtMoney(ad.todaySpend || 0, cur)}</strong> today</div>
-            <div style="font-size:11px;color:#00e5ff;">1-Day Reach: ${ad.todayReach > 0 ? fmtInt(ad.todayReach) : '—'}</div>
+            <div style="font-size:11.5px;color:#0284c7;font-weight:600;">1-Day Reach: ${fmtInt(ad.todayReach || 0)}</div>
           </td>
           <td class="num"><strong>${fmtMoney(ad.spend, cur)}</strong></td>
-          <td class="num">${impCell}</td>
-          <td class="num">${reachCell}</td>
+          <td class="num">${ad.reach !== null ? fmtInt(ad.reach) : '—'}</td>
+          <td class="num">${fmtInt(ad.impressions)}</td>
           <td class="num">
-            <div><strong>${ad.linkClicks > 0 ? fmtInt(ad.linkClicks) : '—'}</strong></div>
-            <div style="font-size:11px;color:#94a3b8;">CTR: ${esc(ad.linkCtrDisplay)}</div>
+            <div><strong>${fmtInt(ad.linkClicks)}</strong></div>
+            <div style="font-size:11px;color:#64748b;">CTR: ${esc(ad.linkCtrDisplay)}</div>
           </td>
-          <td class="num">${leadsCell}</td>
+          <td class="num">${formLeadsCell}</td>
           <td class="num">${cplCell}</td>
-          <td>Ongoing</td>
+          <td class="num">
+            <div><strong>${fmtInt(ad.resultsCount)}</strong> ${esc(ad.resultType)}</div>
+            <div style="font-size:11.5px;color:#64748b;">CPR: ${esc(primaryResultCpr)}</div>
+          </td>
         </tr>
       `;
     }).join('');
@@ -1168,27 +942,99 @@ function renderPerformanceTables() {
 
   document.getElementById('adsTableFoot').innerHTML = `
     <tr>
-      <td colspan="3"><strong>Results from ${ads.length} ads</strong></td>
+      <td colspan="3">TOTAL (${ads.length} Filtered Individual Ads — Aggregate Ratios from Period Totals)</td>
       <td class="num">
         <div>${fmtMoney(sc.todayActualSpend, cur)} today</div>
-        <div style="font-size:11px;color:#00e5ff;">1-Day Reach: ${sc.todayReach ? fmtInt(sc.todayReach) : '—'}</div>
+        <div style="font-size:11px;color:#0284c7;">1-Day Reach: ${sc.todayReach !== null ? fmtInt(sc.todayReach) : '0'}</div>
       </td>
       <td class="num">${fmtMoney(sc.periodActualSpend, cur)}</td>
+      <td class="num">${sc.periodReach !== null ? fmtInt(sc.periodReach) : '—'}</td>
       <td class="num">${fmtInt(sc.periodImpressions)}</td>
-      <td class="num">${sc.periodReach ? fmtInt(sc.periodReach) : '—'}</td>
       <td class="num">${fmtInt(sc.periodLinkClicks)} (${esc(sc.periodLinkCtrDisplay)})</td>
-      <td class="num">${fmtInt(sc.periodReportedFormLeads)} Leads</td>
+      <td class="num">${fmtInt(sc.periodReportedFormLeads)}</td>
       <td class="num">${esc(fmtCpl(sc.periodCpl, sc.periodCplDisplay, cur))}</td>
-      <td>Ongoing</td>
+      <td class="num">${fmtInt(sc.periodReportedFormLeads)} Form Leads</td>
+    </tr>
+  `;
+
+  // Render Campaigns Table
+  const campsBody = document.getElementById('campaignsTableBody');
+  if (camps.length === 0) {
+    campsBody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:28px;color:#64748b;">No campaigns match the active filters in this data source.</td></tr>`;
+  } else {
+    campsBody.innerHTML = camps.map(c => {
+      const budgetText = c.dailyBudget
+        ? `${fmtMoney(c.dailyBudget, cur)} / day`
+        : c.lifetimeBudget
+          ? `${fmtMoney(c.lifetimeBudget, cur)} lifetime`
+          : 'Ad Set Level / Unset';
+
+      const dailyBalance = c.dailyBudget
+        ? `Today left: ${fmtMoney(Math.max(0, c.dailyBudget - (c.todaySpend || 0)), cur)}`
+        : '';
+
+      const isLeadObj = String(c.objective).toUpperCase().includes('LEAD');
+      const cplCell = isLeadObj
+        ? `<strong>${esc(fmtCpl(c.cpl, c.cplDisplay, cur))}</strong>`
+        : `<span style="color:#64748b;">N/A (${esc(c.resultType)})</span>`;
+
+      const primaryCpr = typeof c.costPerResultDisplay === 'number'
+        ? fmtMoney(c.costPerResultDisplay, cur)
+        : c.costPerResultDisplay;
+
+      return `
+        <tr>
+          <td>
+            ${renderOnOffSwitchHtml('campaign', c.campaignId, c.effectiveStatus)}
+          </td>
+          <td>
+            <div style="font-weight:700;color:#0f172a;">${esc(c.name)}</div>
+            <div style="font-size:11.5px;color:#64748b;">ID: ${esc(c.campaignId)} • ${c.activeAdsCount}/${c.totalAdsCount} Ads Active</div>
+          </td>
+          <td>${esc(c.objectiveLabel)}</td>
+          <td class="num">
+            <div><strong>${esc(budgetText)}</strong></div>
+            ${dailyBalance ? `<div style="font-size:11px;color:#059669;">${esc(dailyBalance)}</div>` : ''}
+          </td>
+          <td class="num" style="background:#f8fafc;">
+            <div><strong>${fmtMoney(c.todaySpend || 0, cur)}</strong> today</div>
+            <div style="font-size:11.5px;color:#0284c7;font-weight:600;">1-Day Reach: ${fmtInt(c.todayReach || 0)}</div>
+          </td>
+          <td class="num"><strong>${fmtMoney(c.spend, cur)}</strong></td>
+          <td class="num">${c.reach !== null ? fmtInt(c.reach) : '—'}</td>
+          <td class="num">${fmtInt(c.impressions)}</td>
+          <td class="num">
+            <div><strong>${fmtInt(c.linkClicks)}</strong></div>
+            <div style="font-size:11px;color:#64748b;">CTR: ${esc(c.linkCtrDisplay)}</div>
+          </td>
+          <td class="num"><strong>${fmtInt(c.formLeads)}</strong></td>
+          <td class="num">${cplCell}</td>
+          <td class="num">
+            <div><strong>${fmtInt(c.resultsCount)}</strong> ${esc(c.resultType)}</div>
+            <div style="font-size:11.5px;color:#64748b;">CPR: ${esc(primaryCpr)}</div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  document.getElementById('campaignsTableFoot').innerHTML = `
+    <tr>
+      <td colspan="4">TOTAL (${camps.length} Filtered Campaigns — No Double Counting)</td>
+      <td class="num">
+        <div>${fmtMoney(sc.todayActualSpend, cur)} today</div>
+        <div style="font-size:11px;color:#0284c7;">1-Day Reach: ${sc.todayReach !== null ? fmtInt(sc.todayReach) : '0'}</div>
+      </td>
+      <td class="num">${fmtMoney(sc.periodActualSpend, cur)}</td>
+      <td class="num">${sc.periodReach !== null ? fmtInt(sc.periodReach) : '—'}</td>
+      <td class="num">${fmtInt(sc.periodImpressions)}</td>
+      <td class="num">${fmtInt(sc.periodLinkClicks)} (${esc(sc.periodLinkCtrDisplay)})</td>
+      <td class="num">${fmtInt(sc.periodReportedFormLeads)}</td>
+      <td class="num">${esc(fmtCpl(sc.periodCpl, sc.periodCplDisplay, cur))}</td>
+      <td class="num">${fmtInt(sc.periodReportedFormLeads)} Form Leads</td>
     </tr>
   `;
 }
-
-window.filterByCampaignAndShowAds = async function(campaignId) {
-  state.filters.campaignId = campaignId;
-  await loadDashboard();
-  window.switchMainViewTab('ads');
-};
 
 // ============================================================================
 // 6. "What Needs Attention?" Performance Analysis Section
@@ -1578,31 +1424,18 @@ document.addEventListener('DOMContentLoaded', () => {
     renderAuthGate();
   });
 
-  // Top Multi-Ad-Account Switcher (Across N Ad Accounts — both Header & Main BEE Switcher)
-  async function handleAccountSwitchChange(accountId) {
-    if (!accountId) return;
-    await apiFetch('/api/meta/switch-account', {
-      method: 'POST',
-      body: JSON.stringify({ accountId })
-    });
-    state.filters.campaignId = '';
-    state.filters.adId = '';
-    await loadDashboard();
-  }
-
+  // Top Multi-Ad-Account Switcher (Across N Ad Accounts)
   const topAccSelect = document.getElementById('topAdAccountSelect');
   if (topAccSelect) {
-    topAccSelect.addEventListener('change', (e) => handleAccountSwitchChange(e.target.value));
-  }
-  const mainBeeSelect = document.getElementById('mainBeeAccountSelect');
-  if (mainBeeSelect) {
-    mainBeeSelect.addEventListener('change', (e) => handleAccountSwitchChange(e.target.value));
-  }
-
-  const topDateSelect = document.getElementById('topDatePresetSelect');
-  if (topDateSelect) {
-    topDateSelect.addEventListener('change', async (e) => {
-      state.filters.preset = e.target.value;
+    topAccSelect.addEventListener('change', async (e) => {
+      const accountId = e.target.value;
+      if (!accountId) return;
+      await apiFetch('/api/meta/switch-account', {
+        method: 'POST',
+        body: JSON.stringify({ accountId })
+      });
+      state.filters.campaignId = '';
+      state.filters.adId = '';
       await loadDashboard();
     });
   }
@@ -1662,6 +1495,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let searchTimer = null;
   document.getElementById('filterSearch').addEventListener('input', (e) => {
+    const val = String(e.target.value || '');
+    if (val.includes('@')) {
+      e.target.value = '';
+      state.filters.search = '';
+      return;
+    }
     clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       state.filters.search = e.target.value;
@@ -1694,11 +1533,25 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDailyCharts();
   });
 
+  // Switch between Individual Ads View & Campaigns View
+  document.getElementById('tabBtnAds').addEventListener('click', () => {
+    document.getElementById('tabBtnAds').classList.add('active');
+    document.getElementById('tabBtnCampaigns').classList.remove('active');
+    document.getElementById('adsTableWrap').classList.remove('hidden');
+    document.getElementById('campaignsTableWrap').classList.add('hidden');
+  });
+
+  document.getElementById('tabBtnCampaigns').addEventListener('click', () => {
+    document.getElementById('tabBtnCampaigns').classList.add('active');
+    document.getElementById('tabBtnAds').classList.remove('active');
+    document.getElementById('campaignsTableWrap').classList.remove('hidden');
+    document.getElementById('adsTableWrap').classList.add('hidden');
+  });
+
   // Table Column Sorting
   document.querySelectorAll('[data-sort-ads]').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.getAttribute('data-sort-ads');
-      state.adSort.userClicked = true;
       if (state.adSort.key === key) {
         state.adSort.dir = state.adSort.dir === 'asc' ? 'desc' : 'asc';
       } else {
@@ -1712,7 +1565,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('[data-sort-camps]').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.getAttribute('data-sort-camps');
-      state.campSort.userClicked = true;
       if (state.campSort.key === key) {
         state.campSort.dir = state.campSort.dir === 'asc' ? 'desc' : 'asc';
       } else {
@@ -1742,21 +1594,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.filters.adId) params.set('adId', state.filters.adId);
     if (state.filters.search) params.set('search', state.filters.search);
 
+    const apiUrl = `/api/export/excel?${params.toString()}`;
     try {
-      const check = await fetch(`/api/export/excel?${params.toString()}`, { method: 'HEAD' });
+      const check = await fetch(apiUrl, { method: 'HEAD' });
       const ct = check.headers.get('content-type') || '';
       if (check.ok && ct.includes('spreadsheetml')) {
-        window.location.href = `/api/export/excel?${params.toString()}`;
+        window.location.href = apiUrl;
         return;
       }
     } catch {}
-    // Cloud static fallback (.xlsx report generated from live VIMS SQLite data)
-    const a = document.createElement('a');
-    a.href = './VIMS_Enterprise_Meta_Ads_Report.xlsx';
-    a.download = 'VIMS_Enterprise_Meta_Ads_Report.xlsx';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    window.location.href = './VIMS_Enterprise_Meta_Ads_Report.xlsx';
   });
 
   // Refresh Meta Data Button
